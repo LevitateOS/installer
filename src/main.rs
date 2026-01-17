@@ -18,6 +18,9 @@ mod ui;
 use app::App;
 
 fn main() -> io::Result<()> {
+    // Load .env file if present (before any env var lookups)
+    dotenvy::dotenv().ok();
+
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;

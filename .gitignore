@@ -1,2 +1,5 @@
 # Rust build artifacts
 target/
+
+# Environment config (may contain local paths)
+.env
