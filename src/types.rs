@@ -101,7 +101,6 @@ impl PendingCommand {
 #[derive(Clone)]
 pub struct TrackedAction {
     pub command: String,
-    pub output: String,
     pub success: bool,
     pub undo_command: Option<String>,
     pub undone: bool,

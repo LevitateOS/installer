@@ -178,7 +178,6 @@ impl App {
 
                 self.action_history.push(TrackedAction {
                     command: pending.command.clone(),
-                    output: format!("{}{}", stdout, stderr),
                     success,
                     undo_command,
                     undone: false,
