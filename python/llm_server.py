@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-LLM Server - HTTP server for LevitateOS installer.
+LLM Server for LevitateOS Installer
 
-Loads the model once, serves requests via HTTP.
-Gathers and injects real system facts to prevent hallucination.
+Extends the generic llm-toolkit server with:
+- Real-time system fact gathering (disks, boot mode, mounts, etc.)
+- Disk hallucination detection and blocking
+- Installer-specific system prompt and tool schema
+
+Usage:
+    python llm_server.py --model vendor/models/SmolLM3-3B
+    python llm_server.py --model vendor/models/SmolLM3-3B --adapter adapters/installer
 """
 
 import argparse
@@ -12,19 +18,62 @@ import os
 import re
 import subprocess
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+# Add llm-toolkit to path
+SCRIPT_DIR = Path(__file__).parent.resolve()
+TOOLKIT_DIR = SCRIPT_DIR.parent.parent / "llm-toolkit"
+sys.path.insert(0, str(TOOLKIT_DIR))
 
-# Optional: LoRA support
-try:
-    from peft import PeftModel
-    PEFT_AVAILABLE = True
-except ImportError:
-    PEFT_AVAILABLE = False
+from llm_server import LLMServer, run_server
 
+
+# =============================================================================
+# Installer-Specific Configuration
+# =============================================================================
+
+SHELL_COMMAND_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_shell_command",
+        "description": "Execute a shell command for system installation tasks.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to execute"}
+            },
+            "required": ["command"]
+        }
+    }
+}
+
+SYSTEM_PROMPT_TEMPLATE = """You are the LevitateOS installation assistant. Help users install their operating system.
+
+{system_context}
+
+CRITICAL RULES:
+1. When user wants to DO something (list, format, partition, mount, create, set, install), ALWAYS call run_shell_command
+2. When user CONFIRMS an action (yes, ok, proceed, continue, do it), EXECUTE the pending command via run_shell_command
+3. When user asks a QUESTION (what is, how do, should I, explain), respond with text
+
+COMMAND REFERENCE:
+- List disks: lsblk
+- Partition disk: sgdisk -Z /dev/X && sgdisk -n 1:0:+512M -t 1:ef00 -n 2:0:0 /dev/X
+- Format EFI: mkfs.fat -F32 /dev/X1
+- Format root: mkfs.ext4 /dev/X2
+- Mount root: mount /dev/X2 /mnt
+- Mount EFI: mkdir -p /mnt/boot/efi && mount /dev/X1 /mnt/boot/efi
+- Set hostname: hostnamectl set-hostname NAME
+- Set timezone: timedatectl set-timezone ZONE
+- Create user: useradd -m -G wheel NAME
+- Install GRUB: grub-install --target=x86_64-efi --efi-directory=/boot/efi
+
+Only reference disks that exist in the system state above. Never hallucinate disk names."""
+
+
+# =============================================================================
+# System Facts Gathering
+# =============================================================================
 
 def gather_system_facts() -> dict:
     """Gather real system state - disks, mounts, users, etc."""
@@ -151,79 +200,30 @@ def format_system_context(facts: dict) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(system_context: str) -> str:
-    """Build the full system prompt with injected facts.
+# =============================================================================
+# Installer-Specific LLM Server
+# =============================================================================
 
-    Note: We don't use /no_think prefix so the model shows its reasoning.
-    The thinking content is extracted and shown to users for transparency.
+class InstallerLLMServer(LLMServer):
     """
-    return f"""You are the LevitateOS installation assistant. Help users install their operating system.
+    LLM Server customized for LevitateOS installation.
 
-{system_context}
+    Adds:
+    - System fact injection (disks, boot mode, etc.)
+    - Disk hallucination detection
+    """
 
-CRITICAL RULES:
-1. When user wants to DO something (list, format, partition, mount, create, set, install), ALWAYS call run_shell_command
-2. When user CONFIRMS an action (yes, ok, proceed, continue, do it), EXECUTE the pending command via run_shell_command
-3. When user asks a QUESTION (what is, how do, should I, explain), respond with text
+    def __init__(self, model_path: str, adapter_path: str = None, **kwargs):
+        # Override defaults for installer
+        kwargs.setdefault("default_tools", [SHELL_COMMAND_TOOL])
 
-COMMAND REFERENCE:
-- List disks: lsblk
-- Partition disk: sgdisk -Z /dev/X && sgdisk -n 1:0:+512M -t 1:ef00 -n 2:0:0 /dev/X
-- Format EFI: mkfs.fat -F32 /dev/X1
-- Format root: mkfs.ext4 /dev/X2
-- Mount root: mount /dev/X2 /mnt
-- Mount EFI: mkdir -p /mnt/boot/efi && mount /dev/X1 /mnt/boot/efi
-- Set hostname: hostnamectl set-hostname NAME
-- Set timezone: timedatectl set-timezone ZONE
-- Create user: useradd -m -G wheel NAME
-- Install GRUB: grub-install --target=x86_64-efi --efi-directory=/boot/efi
+        super().__init__(model_path, adapter_path, **kwargs)
 
-Only reference disks that exist in the system state above. Never hallucinate disk names."""
-
-SHELL_COMMAND_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "run_shell_command",
-        "description": "Execute a shell command for system installation tasks.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to execute"}
-            },
-            "required": ["command"]
-        }
-    }
-}
-
-
-class LLMServer:
-    def __init__(self, model_path: str, adapter_path: str = None):
-        print(f"Loading model from {model_path}...", file=sys.stderr)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float32,
-            device_map="auto"
-        )
-
-        # Load LoRA adapter if specified
-        if adapter_path and os.path.exists(adapter_path):
-            if not PEFT_AVAILABLE:
-                print("Warning: peft not installed, cannot load LoRA adapter", file=sys.stderr)
-            else:
-                print(f"Loading LoRA adapter from {adapter_path}...", file=sys.stderr)
-                self.model = PeftModel.from_pretrained(self.model, adapter_path)
-                print("LoRA adapter loaded.", file=sys.stderr)
-
-        # Get the device where the model is loaded
-        self.device = next(self.model.parameters()).device
-        print(f"Model loaded on {self.device}.", file=sys.stderr)
-
-        # Cache system facts (refresh on each query)
+        # Cache for valid disks
+        self._valid_disks = set()
         self._cached_facts = None
-        self._valid_disks = set()  # For verification
 
-    def _refresh_system_facts(self) -> str:
+    def gather_context(self) -> str:
         """Gather fresh system facts and cache valid disk names."""
         facts = gather_system_facts()
         self._cached_facts = facts
@@ -240,148 +240,52 @@ class LLMServer:
 
         return format_system_context(facts)
 
-    def generate(self, messages: list[dict], max_tokens: int = 256) -> dict:
-        """
-        Generate response for a conversation.
+    def build_system_prompt(self, base_prompt: str, context: str) -> str:
+        """Build system prompt with context injection."""
+        # Use our template which expects {system_context}
+        return SYSTEM_PROMPT_TEMPLATE.format(system_context=context)
 
-        Args:
-            messages: List of {"role": "user"|"assistant", "content": "..."} dicts
-                      representing the conversation history.
-            max_tokens: Maximum tokens to generate.
-        """
-        # Refresh system facts and inject into system prompt
-        system_context = self._refresh_system_facts()
-        system_prompt = build_system_prompt(system_context)
-
-        # Build full message list with system prompt first
-        full_messages = [{"role": "system", "content": system_prompt}]
-        full_messages.extend(messages)
-
-        inputs = self.tokenizer.apply_chat_template(
-            full_messages,
-            tools=[SHELL_COMMAND_TOOL],
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt"
-        )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=0.3,  # Low temperature for deterministic, factual outputs
-                top_p=0.9,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-
-        generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
-        raw_output = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
-
-        result = self._extract_response(raw_output)
-
-        # Post-generation verification: check for hallucinated disks
-        result = self._verify_response(result)
-
-        return result
-
-    def _extract_response(self, output: str) -> dict:
-        # Extract thinking content if present
-        thinking = None
-        think_match = re.search(r'<think>(.*?)</think>', output, re.DOTALL)
-        if think_match:
-            thinking = think_match.group(1).strip()
-            if not thinking:  # Empty thinking block
-                thinking = None
-
-        # Check for SmolLM3 XML-style tool call
-        tool_call_match = re.search(r'<tool_call>\s*(\{[^}]+\})\s*</tool_call>', output, re.DOTALL)
-        if tool_call_match:
-            try:
-                tool_data = json.loads(tool_call_match.group(1))
-                if tool_data.get("name") == "run_shell_command":
-                    cmd = tool_data.get("arguments", {}).get("command", "")
-                    result = {"success": True, "type": "command", "command": cmd.strip()}
-                    if thinking:
-                        result["thinking"] = thinking
-                    return result
-            except json.JSONDecodeError:
-                pass
-
-        # Natural language response - strip XML tags but preserve content
-        text = re.sub(r'<think>.*?</think>', '', output, flags=re.DOTALL)  # Remove think block
-        text = re.sub(r'<[^>]+>', '', text).strip()  # Remove other tags
-        result = {"success": True, "type": "text", "response": text}
-        if thinking:
-            result["thinking"] = thinking
-        return result
-
-    def _verify_response(self, result: dict) -> dict:
+    def verify_response(self, result: dict) -> dict:
         """Verify that response doesn't reference non-existent disks/partitions."""
-        if result.get("type") == "command":
-            command = result.get("command", "")
+        # Handle tool_call type from toolkit's extract_response
+        if result.get("type") == "tool_call":
+            tool_name = result.get("tool_name", "")
+            arguments = result.get("arguments", {})
 
-            # Extract any /dev/* paths from the command
-            dev_paths = re.findall(r'/dev/\w+', command)
+            if tool_name == "run_shell_command":
+                command = arguments.get("command", "")
 
-            for path in dev_paths:
-                # Allow common pseudo-devices
-                if path in ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"]:
-                    continue
+                # Extract any /dev/* paths from the command
+                dev_paths = re.findall(r'/dev/\w+', command)
 
-                if path not in self._valid_disks:
-                    # Hallucinated disk detected!
-                    return {
-                        "success": True,
-                        "type": "text",
-                        "response": f"I couldn't find {path} on this system. Let me check what disks are available.",
-                        "warning": f"Blocked hallucinated disk: {path}",
-                        "suggested_command": "lsblk"
-                    }
+                for path in dev_paths:
+                    # Allow common pseudo-devices
+                    if path in ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"]:
+                        continue
+
+                    if path not in self._valid_disks:
+                        # Hallucinated disk detected!
+                        return {
+                            "success": True,
+                            "type": "text",
+                            "response": f"I couldn't find {path} on this system. Let me check what disks are available.",
+                            "warning": f"Blocked hallucinated disk: {path}",
+                            "suggested_command": "lsblk"
+                        }
+
+                # Convert tool_call to installer's expected format
+                return {
+                    "success": True,
+                    "type": "command",
+                    "command": command,
+                    "thinking": result.get("thinking"),
+                }
 
         return result
-
-
-# Global server instance
-llm_server = None
-
-
-class RequestHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        if self.path != "/query":
-            self.send_error(404)
-            return
-
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8")
-
-        try:
-            data = json.loads(body)
-            messages = data.get("messages", [])
-            max_tokens = data.get("max_tokens", 256)
-
-            result = llm_server.generate(messages, max_tokens)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode("utf-8"))
-
-        except Exception as e:
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode("utf-8"))
-
-    def log_message(self, format, *args):
-        print(f"[request] {args[0]}", file=sys.stderr)
 
 
 def main():
-    global llm_server
-
-    parser = argparse.ArgumentParser(description="LLM HTTP Server")
+    parser = argparse.ArgumentParser(description="LevitateOS Installer LLM Server")
     parser.add_argument("--model", "-m", default="vendor/models/SmolLM3-3B", help="Model path")
     parser.add_argument("--adapter", "-a", default=None, help="LoRA adapter path (optional)")
     parser.add_argument("--port", "-p", type=int, default=8765, help="Port to listen on")
@@ -389,20 +293,23 @@ def main():
     args = parser.parse_args()
 
     model_path = Path(args.model)
+    if not model_path.is_absolute() and not model_path.exists():
+        # Try relative to project root
+        project_root = SCRIPT_DIR.parent.parent
+        model_path = project_root / args.model
+    model_path = model_path.resolve()
+
     if not model_path.exists():
-        print(f"Error: Model not found at {args.model}", file=sys.stderr)
+        print(f"Error: Model not found at {model_path}", file=sys.stderr)
         sys.exit(1)
 
-    llm_server = LLMServer(args.model, adapter_path=args.adapter)
+    server = InstallerLLMServer(
+        str(model_path),
+        adapter_path=args.adapter,
+        dtype="float32",  # Installer uses float32 for compatibility
+    )
 
-    server = HTTPServer((args.host, args.port), RequestHandler)
-    print(f"Server listening on http://{args.host}:{args.port}", file=sys.stderr)
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down.", file=sys.stderr)
-        server.shutdown()
+    run_server(server, args.host, args.port)
 
 
 if __name__ == "__main__":
