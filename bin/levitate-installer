@@ -1,0 +1,29 @@
+#!/bin/bash
+# Launches tmux with split panes: bash (left) + docs (right)
+# Shift+Tab switches between panes
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Kill any existing session
+tmux kill-session -t levitate 2>/dev/null
+
+# Create new session with bash in left pane
+tmux new-session -d -s levitate -x "$(tput cols)" -y "$(tput lines)"
+
+# Configure Shift+Tab to switch panes (for this session)
+tmux bind-key -n BTab select-pane -t :.+
+
+# Split horizontally (left/right)
+tmux split-window -h -t levitate
+
+# Left pane (pane 0): bash shell
+tmux send-keys -t levitate:0.0 'clear && echo "LevitateOS Installation Shell" && echo "Run commands here. Shift+Tab to see docs." && echo' Enter
+
+# Right pane (pane 1): docs viewer
+tmux send-keys -t levitate:0.1 "bun $SCRIPT_DIR/src/index.tsx" Enter
+
+# Select left pane (shell) as default
+tmux select-pane -t levitate:0.0
+
+# Attach to session
+tmux attach-session -t levitate

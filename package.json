@@ -3,18 +3,17 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "levitate-installer": "./dist/index.js"
+    "levitate-docs": "./dist/index.js"
   },
   "scripts": {
-    "dev": "tsx src/index.tsx",
-    "build": "tsc",
+    "dev": "bun src/index.tsx",
+    "build": "bun build src/index.tsx --outdir dist --target node --format esm --external ink --external react --external @levitate/docs-content",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "start": "./bin/levitate-installer"
   },
   "dependencies": {
     "@levitate/docs-content": "workspace:*",
     "ink": "^5.2.0",
-    "ink-text-input": "^6.0.0",
     "react": "^18.3.1"
   },
   "devDependencies": {

@@ -2,6 +2,10 @@
 node_modules/
 dist/
 
+# VM development
+.vm/
+xtask/target/
+
 # Environment
 .env
 

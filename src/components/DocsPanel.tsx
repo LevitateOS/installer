@@ -1,5 +1,5 @@
 import { Box, Text, useInput } from "ink"
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import {
 	docsNav,
 	installContent,
@@ -10,10 +10,6 @@ import {
 	type ContentBlock,
 } from "@levitate/docs-content"
 
-interface DocsPanelProps {
-	focused: boolean
-}
-
 // Pre-loaded content map for instant switching
 const contentMap: Record<string, DocsContent> = {
 	"/docs/install": installContent,
@@ -22,7 +18,7 @@ const contentMap: Record<string, DocsContent> = {
 	"/docs/recipes": recipesContent,
 }
 
-export function DocsPanel({ focused }: DocsPanelProps) {
+export function DocsPanel() {
 	const allItems = docsNav.flatMap((section) => section.items)
 	const [selectedIdx, setSelectedIdx] = useState(0)
 	const [scrollOffset, setScrollOffset] = useState(0)
@@ -30,29 +26,24 @@ export function DocsPanel({ focused }: DocsPanelProps) {
 	const currentItem = allItems[selectedIdx]
 	const content = currentItem ? contentMap[currentItem.href] : null
 
-	useInput(
-		(input, key) => {
-			if (!focused) return
-
-			// Navigate docs list
-			if (key.upArrow) {
-				setSelectedIdx((prev) => Math.max(0, prev - 1))
-				setScrollOffset(0)
-			}
-			if (key.downArrow) {
-				setSelectedIdx((prev) => Math.min(allItems.length - 1, prev + 1))
-				setScrollOffset(0)
-			}
-			// Scroll content
-			if (input === "j") {
-				setScrollOffset((prev) => prev + 1)
-			}
-			if (input === "k") {
-				setScrollOffset((prev) => Math.max(0, prev - 1))
-			}
-		},
-		{ isActive: focused }
-	)
+	useInput((input, key) => {
+		// Navigate docs list
+		if (key.upArrow) {
+			setSelectedIdx((prev) => Math.max(0, prev - 1))
+			setScrollOffset(0)
+		}
+		if (key.downArrow) {
+			setSelectedIdx((prev) => Math.min(allItems.length - 1, prev + 1))
+			setScrollOffset(0)
+		}
+		// Scroll content
+		if (input === "j") {
+			setScrollOffset((prev) => prev + 1)
+		}
+		if (input === "k") {
+			setScrollOffset((prev) => Math.max(0, prev - 1))
+		}
+	})
 
 	return (
 		<Box flexDirection="row" flexGrow={1}>
@@ -69,7 +60,7 @@ export function DocsPanel({ focused }: DocsPanelProps) {
 			>
 				{docsNav.map((section) => (
 					<Box key={section.title} flexDirection="column" marginBottom={1}>
-						<Text bold color="cyan" dimColor={!focused}>
+						<Text bold color="cyan">
 							{section.title}
 						</Text>
 						{section.items.map((item) => {
@@ -79,8 +70,7 @@ export function DocsPanel({ focused }: DocsPanelProps) {
 								<Text
 									key={item.href}
 									color={isSelected ? "green" : undefined}
-									dimColor={!focused && !isSelected}
-									inverse={isSelected && focused}
+									inverse={isSelected}
 								>
 									{isSelected ? "▸ " : "  "}
 									{item.title}
@@ -89,9 +79,7 @@ export function DocsPanel({ focused }: DocsPanelProps) {
 						})}
 					</Box>
 				))}
-				{focused && (
-					<Text dimColor>↑↓ select | j/k scroll</Text>
-				)}
+				<Text dimColor>↑↓ select | j/k scroll</Text>
 			</Box>
 
 			{/* Content area */}
