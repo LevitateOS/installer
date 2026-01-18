@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+
+# Training outputs
+python/adapters/
+python/training/*.jsonl
+python/training/*.json
