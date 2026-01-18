@@ -1,7 +1,0 @@
-# Generated training data (run augment-data to regenerate)
-training/augmented_dataset.jsonl
-testing/test_dataset.jsonl
-
-# Annotation checkpoints
-.thinking_checkpoint.json
-.batch_state.json
