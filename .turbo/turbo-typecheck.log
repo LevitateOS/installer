@@ -1,1 +1,7 @@
 $ tsc --noEmit
+../docs-content/src/discovery.ts(4,36): error TS2339: Property 'glob' does not exist on type 'ImportMeta'.
+../docs-content/src/discovery.ts(30,33): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(o: ArrayLike<unknown> | { [s: string]: unknown; }): unknown[]', gave the following error.
+    Argument of type 'unknown' is not assignable to parameter of type 'ArrayLike<unknown> | { [s: string]: unknown; }'.
+  Overload 2 of 2, '(o: {}): any[]', gave the following error.
+    Argument of type 'unknown' is not assignable to parameter of type '{}'.

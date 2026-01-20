@@ -2,20 +2,21 @@ import { Box, Text, useInput } from "ink"
 import { useState } from "react"
 import {
 	docsNav,
-	installContent,
-	manualInstallContent,
-	recipeCliContent,
-	recipesContent,
+	contentBySlug,
 	type DocsContent,
 	type ContentBlock,
+	type RichText,
 } from "@levitate/docs-content"
 
-// Pre-loaded content map for instant switching
-const contentMap: Record<string, DocsContent> = {
-	"/docs/install": installContent,
-	"/docs/manual-install": manualInstallContent,
-	"/docs/recipe": recipeCliContent,
-	"/docs/recipes": recipesContent,
+/** Convert RichText to plain string for terminal display */
+function toPlainText(content: string | RichText): string {
+	if (typeof content === "string") return content
+	return content
+		.map((node) => {
+			if (typeof node === "string") return node
+			return node.text
+		})
+		.join("")
 }
 
 export function DocsPanel() {
@@ -24,7 +25,9 @@ export function DocsPanel() {
 	const [scrollOffset, setScrollOffset] = useState(0)
 
 	const currentItem = allItems[selectedIdx]
-	const content = currentItem ? contentMap[currentItem.href] : null
+	// Extract slug from href (e.g., "/docs/installation" -> "installation")
+	const slug = currentItem?.href.replace("/docs/", "") || ""
+	const content = contentBySlug[slug] || null
 
 	useInput((input, key) => {
 		// Navigate docs list
@@ -113,7 +116,7 @@ function ContentRenderer({ content, scrollOffset }: ContentRendererProps) {
 	if (content.intro) {
 		lines.push(
 			<Text key="intro" wrap="wrap" dimColor>
-				{content.intro}
+				{toPlainText(content.intro)}
 			</Text>
 		)
 		lines.push(<Text key="spacer2"> </Text>)
@@ -153,23 +156,16 @@ function renderBlock(block: ContentBlock, key: string): React.ReactNode {
 		case "text":
 			return (
 				<Text key={key} wrap="wrap">
-					{block.content}
+					{toPlainText(block.content)}
 				</Text>
 			)
 
 		case "code":
 			return (
-				<Box key={key} marginY={0} paddingX={1}>
-					<Text color="yellow">{block.content}</Text>
-				</Box>
-			)
-
-		case "file":
-			return (
 				<Box key={key} flexDirection="column" marginY={0}>
-					<Text dimColor>{block.filename}</Text>
+					{block.filename && <Text dimColor>{block.filename}</Text>}
 					<Box paddingX={1}>
-						<Text color="cyan">{block.content}</Text>
+						<Text color="yellow">{block.content}</Text>
 					</Box>
 				</Box>
 			)
@@ -180,7 +176,11 @@ function renderBlock(block: ContentBlock, key: string): React.ReactNode {
 					{block.items.map((item, i) => (
 						<Text key={i}>
 							{"• "}
-							{typeof item === "string" ? item : item.text}
+							{typeof item === "string"
+								? item
+								: Array.isArray(item)
+									? toPlainText(item)
+									: toPlainText(item.text)}
 						</Text>
 					))}
 				</Box>
@@ -189,9 +189,9 @@ function renderBlock(block: ContentBlock, key: string): React.ReactNode {
 		case "table":
 			return (
 				<Box key={key} flexDirection="column" marginY={0}>
-					<Text bold>{block.headers.join(" | ")}</Text>
+					<Text bold>{block.headers.map(toPlainText).join(" | ")}</Text>
 					{block.rows.map((row, i) => (
-						<Text key={i}>{row.join(" | ")}</Text>
+						<Text key={i}>{row.map(toPlainText).join(" | ")}</Text>
 					))}
 				</Box>
 			)
@@ -204,24 +204,41 @@ function renderBlock(block: ContentBlock, key: string): React.ReactNode {
 							<Text color={msg.role === "user" ? "green" : "blue"}>
 								{msg.role === "user" ? "You: " : "AI: "}
 							</Text>
-							{msg.text}
+							{toPlainText(msg.text)}
 						</Text>
 					))}
 				</Box>
 			)
 
-		case "link":
+		case "interactive":
 			return (
-				<Text key={key} color="blue">
-					{block.text}
-				</Text>
+				<Box key={key} flexDirection="column" marginLeft={2}>
+					{block.steps.map((step, i) => (
+						<Text key={i}>
+							<Text color="yellow">{step.command}</Text>
+							<Text dimColor> - {toPlainText(step.description)}</Text>
+						</Text>
+					))}
+				</Box>
 			)
 
-		case "inline-code":
+		case "command":
 			return (
-				<Text key={key} color="yellow">
-					{block.content}
-				</Text>
+				<Box key={key} flexDirection="column" marginY={0}>
+					<Text dimColor>{block.description}</Text>
+					<Box paddingX={1}>
+						<Text color="green">
+							{Array.isArray(block.command)
+								? block.command.join("\n")
+								: block.command}
+						</Text>
+					</Box>
+					{block.output && (
+						<Box paddingX={1}>
+							<Text dimColor>{block.output}</Text>
+						</Box>
+					)}
+				</Box>
 			)
 
 		default:
