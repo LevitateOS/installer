@@ -10,10 +10,100 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const SSH_PORT: u16 = 2223; // Different from recipe VM (2222)
+const SSH_USER: &str = "dev";
+const SSH_HOST: &str = "localhost";
 const DISK_SIZE: &str = "20G";
 // HARD REQUIREMENT: Must match kickstart releasever (see REQUIREMENTS.md)
 const FEDORA_VERSION: &str = "43";
 const FEDORA_IMAGE_URL: &str = "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2";
+
+// SSH timeout constants (in seconds)
+const SSH_TIMEOUT_PROBE: u16 = 2;  // Quick probe during wait_for_ssh loop
+const SSH_TIMEOUT_CHECK: u16 = 3;  // Status check (try_ssh)
+const SSH_TIMEOUT_RUN: u16 = 10;   // Command execution (run_ssh)
+
+/// Builder for SSH commands - consolidates common SSH configuration
+struct SshCommand {
+    timeout: Option<u16>,
+    batch_mode: bool,
+    force_pty: bool,
+    command: Option<String>,
+}
+
+impl SshCommand {
+    fn new() -> Self {
+        Self {
+            timeout: None,
+            batch_mode: false,
+            force_pty: false,
+            command: None,
+        }
+    }
+
+    /// Set connection timeout in seconds
+    fn timeout(mut self, secs: u16) -> Self {
+        self.timeout = Some(secs);
+        self
+    }
+
+    /// Enable batch mode (no password prompts, fail on auth issues)
+    fn batch_mode(mut self) -> Self {
+        self.batch_mode = true;
+        self
+    }
+
+    /// Force PTY allocation (for interactive commands like tmux)
+    fn force_pty(mut self) -> Self {
+        self.force_pty = true;
+        self
+    }
+
+    /// Set the command to run (None for interactive shell)
+    fn command(mut self, cmd: &str) -> Self {
+        self.command = Some(cmd.to_string());
+        self
+    }
+
+    /// Build the SSH command arguments
+    fn build_args(self) -> Vec<String> {
+        let mut args = vec![
+            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+            "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+            "-o".to_string(), "LogLevel=ERROR".to_string(),
+            "-o".to_string(), format!("IdentityFile={}", ssh_key_path().display()),
+            "-o".to_string(), "IdentitiesOnly=yes".to_string(),
+            "-p".to_string(), SSH_PORT.to_string(),
+        ];
+
+        if let Some(timeout) = self.timeout {
+            args.extend(["-o".to_string(), format!("ConnectTimeout={}", timeout)]);
+        }
+
+        if self.batch_mode {
+            args.extend(["-o".to_string(), "BatchMode=yes".to_string()]);
+        }
+
+        if self.force_pty {
+            args.push("-t".to_string());
+        }
+
+        args.push(format!("{}@{}", SSH_USER, SSH_HOST));
+
+        if let Some(cmd) = self.command {
+            args.push(cmd);
+        }
+
+        args
+    }
+
+    /// Build and return a Command ready to execute
+    fn build(self) -> Command {
+        let args = self.build_args();
+        let mut cmd = Command::new("ssh");
+        cmd.args(&args);
+        cmd
+    }
+}
 
 /// Get the installer directory (parent of xtask)
 fn installer_root() -> PathBuf {
@@ -141,18 +231,6 @@ fn get_ssh_pubkey() -> Result<String> {
         .context("Failed to read SSH public key")
 }
 
-/// Common SSH args with key auth
-fn ssh_args() -> Vec<String> {
-    vec![
-        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-        "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
-        "-o".to_string(), "LogLevel=ERROR".to_string(),
-        "-o".to_string(), format!("IdentityFile={}", ssh_key_path().display()),
-        "-o".to_string(), "IdentitiesOnly=yes".to_string(),
-        "-p".to_string(), SSH_PORT.to_string(),
-    ]
-}
-
 /// Wait for SSH to become available (with timeout)
 fn wait_for_ssh(timeout_secs: u32) -> Result<()> {
     print!("Waiting for SSH");
@@ -162,16 +240,11 @@ fn wait_for_ssh(timeout_secs: u32) -> Result<()> {
     let timeout = std::time::Duration::from_secs(timeout_secs as u64);
 
     while start.elapsed() < timeout {
-        let mut args = ssh_args();
-        args.extend([
-            "-o".to_string(), "ConnectTimeout=2".to_string(),
-            "-o".to_string(), "BatchMode=yes".to_string(),
-            "dev@localhost".to_string(),
-            "true".to_string(),
-        ]);
-
-        let result = Command::new("ssh")
-            .args(&args)
+        let result = SshCommand::new()
+            .timeout(SSH_TIMEOUT_PROBE)
+            .batch_mode()
+            .command("true")
+            .build()
             .output();
 
         if let Ok(output) = result {
@@ -192,16 +265,11 @@ fn wait_for_ssh(timeout_secs: u32) -> Result<()> {
 
 /// Try SSH command, return true if successful
 fn try_ssh(command: &str) -> bool {
-    let mut args = ssh_args();
-    args.extend([
-        "-o".to_string(), "ConnectTimeout=3".to_string(),
-        "-o".to_string(), "BatchMode=yes".to_string(),
-        "dev@localhost".to_string(),
-        command.to_string(),
-    ]);
-
-    Command::new("ssh")
-        .args(&args)
+    SshCommand::new()
+        .timeout(SSH_TIMEOUT_CHECK)
+        .batch_mode()
+        .command(command)
+        .build()
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -209,16 +277,11 @@ fn try_ssh(command: &str) -> bool {
 
 /// Run SSH command and get output
 fn run_ssh(command: &str) -> Result<String> {
-    let mut args = ssh_args();
-    args.extend([
-        "-o".to_string(), "ConnectTimeout=10".to_string(),
-        "-o".to_string(), "BatchMode=yes".to_string(),
-        "dev@localhost".to_string(),
-        command.to_string(),
-    ]);
-
-    let output = Command::new("ssh")
-        .args(&args)
+    let output = SshCommand::new()
+        .timeout(SSH_TIMEOUT_RUN)
+        .batch_mode()
+        .command(command)
+        .build()
         .output()
         .context("Failed to run SSH command")?;
 
@@ -677,11 +740,8 @@ pub fn ssh() -> Result<()> {
 
     println!("Connecting...");
 
-    let mut args = ssh_args();
-    args.push("dev@localhost".to_string());
-
-    Command::new("ssh")
-        .args(&args)
+    SshCommand::new()
+        .build()
         .status()
         .context("Failed to SSH")?;
 
@@ -805,15 +865,10 @@ pub fn run() -> Result<()> {
     println!("  exit: quit");
     println!();
 
-    let mut args = ssh_args();
-    args.extend([
-        "-t".to_string(), // Force PTY for tmux
-        "dev@localhost".to_string(),
-        "cd ~/installer && TERM=xterm-256color PATH=\"$HOME/.bun/bin:$PATH\" ./bin/levitate-installer".to_string(),
-    ]);
-
-    Command::new("ssh")
-        .args(&args)
+    SshCommand::new()
+        .force_pty()
+        .command("cd ~/installer && TERM=xterm-256color PATH=\"$HOME/.bun/bin:$PATH\" ./bin/levitate-installer")
+        .build()
         .status()
         .context("Failed to run installer")?;
 
@@ -965,4 +1020,262 @@ pub fn iso_run(memory: u32, cpus: u32) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // SshCommand Builder Tests
+    // =========================================================================
+
+    #[test]
+    fn ssh_command_default() {
+        let args = SshCommand::new().build_args();
+
+        // Should contain base args
+        assert!(args.contains(&"-o".to_string()));
+        assert!(args.contains(&"StrictHostKeyChecking=no".to_string()));
+        assert!(args.contains(&"UserKnownHostsFile=/dev/null".to_string()));
+        assert!(args.contains(&"LogLevel=ERROR".to_string()));
+        assert!(args.contains(&"IdentitiesOnly=yes".to_string()));
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&SSH_PORT.to_string()));
+
+        // Should have user@host
+        assert!(args.contains(&format!("{}@{}", SSH_USER, SSH_HOST)));
+
+        // Should NOT have timeout, BatchMode, -t by default
+        assert!(!args.iter().any(|a| a.starts_with("ConnectTimeout=")));
+        assert!(!args.contains(&"BatchMode=yes".to_string()));
+        assert!(!args.contains(&"-t".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_with_timeout() {
+        let args = SshCommand::new().timeout(5).build_args();
+        assert!(args.contains(&"ConnectTimeout=5".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_with_batch_mode() {
+        let args = SshCommand::new().batch_mode().build_args();
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_with_force_pty() {
+        let args = SshCommand::new().force_pty().build_args();
+        assert!(args.contains(&"-t".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_with_command() {
+        let args = SshCommand::new().command("echo hello").build_args();
+        assert!(args.last() == Some(&"echo hello".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_probe_configuration() {
+        // Probe: quick timeout, batch mode, simple command
+        let args = SshCommand::new()
+            .timeout(SSH_TIMEOUT_PROBE)
+            .batch_mode()
+            .command("true")
+            .build_args();
+
+        assert!(args.contains(&format!("ConnectTimeout={}", SSH_TIMEOUT_PROBE)));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        assert!(args.last() == Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_check_configuration() {
+        // Check: medium timeout, batch mode
+        let args = SshCommand::new()
+            .timeout(SSH_TIMEOUT_CHECK)
+            .batch_mode()
+            .command("which bun")
+            .build_args();
+
+        assert!(args.contains(&format!("ConnectTimeout={}", SSH_TIMEOUT_CHECK)));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_run_configuration() {
+        // Run: longer timeout, batch mode
+        let args = SshCommand::new()
+            .timeout(SSH_TIMEOUT_RUN)
+            .batch_mode()
+            .command("ls -la")
+            .build_args();
+
+        assert!(args.contains(&format!("ConnectTimeout={}", SSH_TIMEOUT_RUN)));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_interactive_with_pty() {
+        // Interactive with PTY for tmux
+        let args = SshCommand::new()
+            .force_pty()
+            .command("./installer")
+            .build_args();
+
+        assert!(args.contains(&"-t".to_string()));
+        assert!(!args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    #[test]
+    fn ssh_command_argument_order() {
+        // Verify user@host comes before command
+        let args = SshCommand::new().command("test").build_args();
+
+        let user_host_pos = args.iter().position(|a| a.contains('@')).unwrap();
+        let cmd_pos = args.iter().position(|a| a == "test").unwrap();
+        assert!(user_host_pos < cmd_pos, "user@host should come before command");
+    }
+
+    #[test]
+    fn ssh_command_identity_file_included() {
+        let args = SshCommand::new().build_args();
+        let identity_file = args.iter().find(|a| a.starts_with("IdentityFile="));
+        assert!(identity_file.is_some());
+        assert!(identity_file.unwrap().contains("id_ed25519"));
+    }
+
+    #[test]
+    fn ssh_command_all_options_combined() {
+        let args = SshCommand::new()
+            .timeout(15)
+            .batch_mode()
+            .force_pty()
+            .command("complex command with args")
+            .build_args();
+
+        assert!(args.contains(&"ConnectTimeout=15".to_string()));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        assert!(args.contains(&"-t".to_string()));
+        assert!(args.last() == Some(&"complex command with args".to_string()));
+    }
+
+    // =========================================================================
+    // SSH Constants Tests
+    // =========================================================================
+
+    #[test]
+    fn ssh_constants_valid() {
+        // Timeouts should be reasonable values
+        assert!(SSH_TIMEOUT_PROBE > 0 && SSH_TIMEOUT_PROBE <= 5);
+        assert!(SSH_TIMEOUT_CHECK > SSH_TIMEOUT_PROBE);
+        assert!(SSH_TIMEOUT_RUN > SSH_TIMEOUT_CHECK);
+
+        // Port should be valid
+        assert!(SSH_PORT > 1024 && SSH_PORT < 65535);
+
+        // User and host should be non-empty
+        assert!(!SSH_USER.is_empty());
+        assert!(!SSH_HOST.is_empty());
+    }
+
+    #[test]
+    fn ssh_timeout_probe_is_fastest() {
+        assert!(SSH_TIMEOUT_PROBE < SSH_TIMEOUT_CHECK);
+        assert!(SSH_TIMEOUT_PROBE < SSH_TIMEOUT_RUN);
+    }
+
+    #[test]
+    fn ssh_timeout_hierarchy() {
+        // Probe < Check < Run
+        assert!(SSH_TIMEOUT_PROBE < SSH_TIMEOUT_CHECK, "Probe timeout should be smaller than check");
+        assert!(SSH_TIMEOUT_CHECK < SSH_TIMEOUT_RUN, "Check timeout should be smaller than run");
+    }
+
+    // =========================================================================
+    // Path Functions Tests (these don't require VM running)
+    // =========================================================================
+
+    #[test]
+    fn installer_root_is_parent_of_xtask() {
+        let root = installer_root();
+        assert!(root.ends_with("installer"));
+    }
+
+    #[test]
+    fn project_root_is_parent_of_installer() {
+        let root = project_root();
+        let installer = installer_root();
+        assert_eq!(installer.parent().unwrap(), root);
+    }
+
+    #[test]
+    fn vm_dir_is_in_installer() {
+        let vm = vm_dir();
+        assert!(vm.starts_with(installer_root()));
+        assert!(vm.ends_with(".vm"));
+    }
+
+    #[test]
+    fn disk_image_path() {
+        let disk = disk_image();
+        assert!(disk.ends_with("fedora-installer-dev.qcow2"));
+        assert!(disk.starts_with(vm_dir()));
+    }
+
+    #[test]
+    fn base_image_path() {
+        let base = base_image();
+        assert!(base.ends_with("fedora-cloud-base.qcow2"));
+        assert!(base.starts_with(vm_dir()));
+    }
+
+    #[test]
+    fn pid_file_path() {
+        let pid = pid_file();
+        assert!(pid.ends_with("qemu.pid"));
+        assert!(pid.starts_with(vm_dir()));
+    }
+
+    #[test]
+    fn monitor_socket_path() {
+        let socket = monitor_socket();
+        assert!(socket.ends_with("qemu-monitor.sock"));
+        assert!(socket.starts_with(vm_dir()));
+    }
+
+    #[test]
+    fn ssh_key_path_is_ed25519() {
+        let key = ssh_key_path();
+        assert!(key.ends_with("id_ed25519"));
+        assert!(key.starts_with(vm_dir()));
+    }
+
+    // =========================================================================
+    // Fedora Configuration Tests
+    // =========================================================================
+
+    #[test]
+    fn fedora_version_is_numeric() {
+        assert!(FEDORA_VERSION.parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn fedora_image_url_contains_version() {
+        assert!(FEDORA_IMAGE_URL.contains(FEDORA_VERSION));
+    }
+
+    #[test]
+    fn fedora_image_url_is_https() {
+        assert!(FEDORA_IMAGE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn disk_size_is_valid() {
+        // Should be like "20G" or "10G"
+        assert!(DISK_SIZE.ends_with('G') || DISK_SIZE.ends_with('M'));
+        let numeric_part: String = DISK_SIZE.chars().filter(|c| c.is_numeric()).collect();
+        assert!(numeric_part.parse::<u32>().is_ok());
+    }
 }
